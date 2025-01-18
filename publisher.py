@@ -7,6 +7,7 @@ from scraper import scrape_positions
 import pandas as pd
 from datetime import datetime
 import sys
+from position_tracker import PositionTracker
 
 class PositionPublisher:
     def __init__(self, bootstrap_servers=['localhost:9092'], topic='vault_positions', max_retries=5):
@@ -14,7 +15,7 @@ class PositionPublisher:
         self.topic = topic
         self.producer = None
         self.max_retries = max_retries
-        self.previous_positions = None
+        self.position_tracker = PositionTracker()  # Initialize the tracker
         self.connect_to_kafka()
 
     def connect_to_kafka(self):
@@ -45,52 +46,6 @@ class PositionPublisher:
                 print(f"Kafka not available, retrying in 5 seconds...")
                 time.sleep(5)
 
-    def detect_position_changes(self, current_positions):
-        if self.previous_positions is None:
-            self.previous_positions = current_positions
-            return [], []  # First run, no changes to report
-        
-        # Convert DataFrames to dictionaries for easier comparison
-        prev_dict = self.previous_positions.set_index('asset').to_dict('index')
-        curr_dict = current_positions.set_index('asset').to_dict('index')
-        
-        # Find closed positions (in previous but not in current)
-        closed_positions = []
-        for asset in prev_dict:
-            if asset not in curr_dict:
-                position = prev_dict[asset].copy()
-                position['asset'] = asset
-                position['event_type'] = 'POSITION_CLOSED'
-                closed_positions.append(position)
-        
-        # Find new or modified positions
-        modified_positions = []
-        for asset in curr_dict:
-            curr_pos = curr_dict[asset].copy()
-            curr_pos['asset'] = asset
-            
-            if asset not in prev_dict:
-                # New position
-                curr_pos['event_type'] = 'POSITION_OPENED'
-                modified_positions.append(curr_pos)
-            else:
-                # Check if position was modified
-                prev_pos = prev_dict[asset]
-                if (curr_pos['size'] != prev_pos['size'] or 
-                    curr_pos['direction'] != prev_pos['direction'] or 
-                    curr_pos['leverage'] != prev_pos['leverage'] or
-                    curr_pos['notional_value'] != prev_pos['notional_value'] or
-                    curr_pos['entry_price'] != prev_pos['entry_price'] or
-                    curr_pos['mark_price'] != prev_pos['mark_price'] or
-                    curr_pos['pnl'] != prev_pos['pnl']):
-                    
-                    curr_pos['event_type'] = 'POSITION_MODIFIED'
-                    curr_pos['previous_state'] = prev_pos
-                    modified_positions.append(curr_pos)
-        
-        self.previous_positions = current_positions
-        return closed_positions, modified_positions
-    
     def publish_changes(self, changes):
         for change in changes:
             # Add timestamp and format message
@@ -119,11 +74,11 @@ class PositionPublisher:
                 # Fetch current positions
                 current_positions = scrape_positions(vault_url)
                 
-                # Detect changes
-                closed_positions, modified_positions = self.detect_position_changes(current_positions)
+                # Detect changes using the shared tracker
+                closed_positions, opened_positions = self.position_tracker.detect_position_changes(current_positions)
                 
                 # Publish all changes
-                all_changes = closed_positions + modified_positions
+                all_changes = closed_positions + opened_positions
                 if all_changes:
                     self.publish_changes(all_changes)
                 else:
@@ -146,7 +101,7 @@ if __name__ == "__main__":
             max_retries=5
         )
         
-        publisher.run(vault_url, interval_seconds=5)
+        publisher.run(vault_url)
     except KeyboardInterrupt:
         print("\nShutting down position monitor...")
     except Exception as e:

@@ -5,6 +5,7 @@ from datetime import datetime
 import pandas as pd
 from scraper import scrape_positions
 from typing import List, Optional, Dict, Any
+from position_tracker import PositionTracker
 
 app = FastAPI(title="HyperLiquid Position Tracker")
 
@@ -17,8 +18,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Store previous positions
-previous_positions: Optional[pd.DataFrame] = None
+# Initialize position tracker
+position_tracker = PositionTracker()
 
 class PositionChange(BaseModel):
     timestamp: str
@@ -28,34 +29,6 @@ class PositionChange(BaseModel):
 class PositionResponse(BaseModel):
     changes: List[PositionChange]
     current_positions: List[Dict[str, Any]]
-
-def detect_position_changes(current_positions: pd.DataFrame) -> tuple[list, list]:
-    global previous_positions
-    
-    if previous_positions is None:
-        previous_positions = current_positions
-        return [], []  # First call, no changes to report
-    
-    # Get sets of assets from previous and current positions
-    prev_assets = set(previous_positions['asset'].values)
-    curr_assets = set(current_positions['asset'].values)
-    
-    # Find closed positions (in previous but not in current)
-    closed_positions = []
-    for asset in prev_assets - curr_assets:
-        position = previous_positions[previous_positions['asset'] == asset].to_dict('records')[0]
-        position['event_type'] = 'POSITION_CLOSED'
-        closed_positions.append(position)
-    
-    # Find new positions (in current but not in previous)
-    opened_positions = []
-    for asset in curr_assets - prev_assets:
-        position = current_positions[current_positions['asset'] == asset].to_dict('records')[0]
-        position['event_type'] = 'POSITION_OPENED'
-        opened_positions.append(position)
-    
-    previous_positions = current_positions
-    return closed_positions, opened_positions
 
 @app.get("/positions", response_model=PositionResponse)
 async def get_positions():
@@ -69,8 +42,8 @@ async def get_positions():
         # Fetch current positions
         current_positions = scrape_positions(vault_url)
         
-        # Detect changes
-        closed_positions, opened_positions = detect_position_changes(current_positions)
+        # Detect changes using the shared tracker
+        closed_positions, opened_positions = position_tracker.detect_position_changes(current_positions)
         
         # Format changes
         changes = []
